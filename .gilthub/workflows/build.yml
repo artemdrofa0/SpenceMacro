@@ -1,0 +1,204 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create project files
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "SpeedMacro"
+          include(":app")
+          EOF
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.speedmacro"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.speedmacro"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Speed Macro" android:allowBackup="false">
+                  <service
+                      android:name=".MacroService"
+                      android:exported="false"
+                      android:label="Speed Macro"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p $(dirname app/src/main/res/xml/accessibility_service_config.xml)
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeAllMask"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:description="@string/service_desc"
+              android:notificationTimeout="100" />
+          EOF
+          mkdir -p $(dirname app/src/main/res/values/strings.xml)
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="service_desc">Быстрые свайпы камеры по кнопке</string>
+          </resources>
+          EOF
+          mkdir -p $(dirname app/src/main/java/com/example/speedmacro/MacroService.kt)
+          cat > app/src/main/java/com/example/speedmacro/MacroService.kt <<'EOF'
+          package com.example.speedmacro
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Color
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+
+          class MacroService : AccessibilityService() {
+
+              // ===== НАСТРОЙКИ (меняй под себя) =====
+              private val startX = 0.60f     // где начинается свайп (доля ширины экрана, правая половина = камера)
+              private val swipeLen = 0.30f   // длина свайпа (доля ширины). Подбирай, чтобы выходило ровно 180°
+              private val yPos = 0.50f       // высота свайпа (доля высоты)
+              private val swipeMs = 8L       // длительность одного свайпа, мс
+              // ======================================
+
+              private val handler = Handler(Looper.getMainLooper())
+              private lateinit var wm: WindowManager
+              private var btn: Button? = null
+              private lateinit var lp: WindowManager.LayoutParams
+              private var running = false
+              private var toRight = true
+
+              override fun onServiceConnected() {
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  lp = WindowManager.LayoutParams(
+                      200, 200,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 300 }
+
+                  btn = Button(this).apply {
+                      text = "▶"
+                      textSize = 24f
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(Color.parseColor("#AA2E7D32"))
+                      setOnTouchListener(dragOrTap())
+                  }
+                  wm.addView(btn, lp)
+              }
+
+              private fun dragOrTap(): android.view.View.OnTouchListener {
+                  var downX = 0f; var downY = 0f; var startLx = 0; var startLy = 0; var moved = false
+                  return android.view.View.OnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX; downY = e.rawY
+                              startLx = lp.x; startLy = lp.y; moved = false
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - downX; val dy = e.rawY - downY
+                              if (Math.abs(dx) > 15 || Math.abs(dy) > 15) moved = true
+                              if (moved) {
+                                  lp.x = startLx + dx.toInt(); lp.y = startLy + dy.toInt()
+                                  wm.updateViewLayout(btn, lp)
+                              }
+                          }
+                          MotionEvent.ACTION_UP -> if (!moved) toggle()
+                      }
+                      true
+                  }
+              }
+
+              private fun toggle() {
+                  running = !running
+                  btn?.text = if (running) "⏸" else "▶"
+                  btn?.setBackgroundColor(Color.parseColor(if (running) "#AAC62828" else "#AA2E7D32"))
+                  if (running) swipe()
+              }
+
+              private fun swipe() {
+                  if (!running) return
+                  val dm = resources.displayMetrics
+                  val w = dm.widthPixels.toFloat(); val h = dm.heightPixels.toFloat()
+                  val x0 = w * startX; val x1 = x0 + w * swipeLen; val y = h * yPos
+                  val p = Path()
+                  if (toRight) { p.moveTo(x0, y); p.lineTo(x1, y) } else { p.moveTo(x1, y); p.lineTo(x0, y) }
+                  toRight = !toRight
+                  val g = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(p, 0, swipeMs)).build()
+                  val ok = dispatchGesture(g, object : GestureResultCallback() {
+                      override fun onCompleted(d: GestureDescription?) { swipe() }
+                      override fun onCancelled(d: GestureDescription?) { handler.postDelayed({ swipe() }, 5) }
+                  }, null)
+                  if (!ok) handler.postDelayed({ swipe() }, 16)
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() { running = false }
+
+              override fun onDestroy() {
+                  running = false
+                  btn?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  super.onDestroy()
+              }
+          }
+          EOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeedMacro-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
